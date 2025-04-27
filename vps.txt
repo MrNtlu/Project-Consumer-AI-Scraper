@@ -1,0 +1,52 @@
+ssh username@server_ip_address
+
+pm2 start upcoming.js --name myapp --node-args="--max-old-space-size=3072" --no-autorestart
+
+pm2 start upcoming.js --name upcoming --node-args="--max-old-space-size=3072" --no-autorestart --cron-restart="0 3 * * 1"
+
+0 3 * * 1 //Monday at 3 AM
+
+pm2 start index.js --name main --node-args="--max-old-space-size=3072" --no-autorestart --cron-restart="0 1 2 * *"
+
+0 1 2 * * //Every month on 2nd day at 1 AM
+
+pm2 set myapp restart none
+
+crontab -e
+
+0 0 * * 0 pm2 restart myapp //weekly
+
+// Pm2
+
+pm2 start index.js --node-args="--max-old-space-size=2048" or 3072  // Run code
+
+pm2 flush <process-name>
+
+pm2 status
+
+pm2 logs <process-name>
+
+pm2 stop all
+
+pm2 restart <process-name>
+
+pm2 delete <process-name>
+
+pm2 resurrect --cron "0 0 1 * *"
+
+pm2 save
+
+pm2 kill
+
+
+//Cron
+
+crontab -e // Edit (Ctrl+O -> Enter)
+
+crontab -l // List
+
+sudo service cron status // Status
+
+sudo systemctl disable cron
+
+sudo systemctl enable cron

@@ -1,0 +1,27 @@
+# NPM Common Commands
+
+## Package Management
+- `npm install` - Installs all dependencies listed in package.json
+- `npm install <package>` - Installs a specific package and adds it to dependencies
+- `npm install <package> --save-dev` - Installs a package and adds it to devDependencies
+- `npm uninstall <package>` - Removes a package from node_modules and updates package.json
+- `npm update` - Updates all packages to the latest minor versions based on package.json
+- `npm outdated` - Shows which installed packages are outdated
+
+## Security & Maintenance
+- `npm audit` - Scans dependencies for security vulnerabilities
+- `npm audit fix` - Automatically fixes vulnerabilities if possible
+- `npm cache clean --force` - Clears npm's cache (useful when weird issues happen)
+- `npm list` - Shows installed packages and their versions
+
+## Running Scripts
+- `npm run <script>` - Runs a custom script defined in package.json under "scripts"
+- `npm start` - Runs the "start" script from package.json (Commonly used to start apps)
+- `npm restart` - Runs the "restart" script or stops and starts the app
+- `npm ci` - Clean install based on package-lock.json (useful in CI/CD pipelines)
+- `npx <package>` - Runs a package without installing globally (great for CLI tools)
+
+# Start Project
+
+- `node index.js` - Start Project
+- `node --version` - Shows the installed Node.js version
