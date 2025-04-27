@@ -127,6 +127,29 @@ function buildText(doc, type) {
   return text;
 }
 
+// Helper function to delay execution
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper function to handle rate limits with exponential backoff
+async function withRetry(fn, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error?.error?.type === 'requests' && error.status === 429) {
+        const waitTime = 4400;
+        console.log(`⏳ Rate limit hit, waiting ${waitTime/1000}s before retry ${attempt}/${maxRetries}`);
+        await sleep(waitTime);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Failed after ${maxRetries} retries`);
+}
+
 // -------------------------------------------------------------------
 // 4. Ingest one MongoDB collection into Pinecone (with batching & logs)
 // -------------------------------------------------------------------
@@ -134,9 +157,10 @@ async function ingestCollection({ mongo, openai, pineconeIndex }, collName, cont
   console.log(`📂 Starting ingestion for collection: ${collName}`);
   const cursor = mongo.db().collection(collName).find({});
   const BATCH_SIZE = 50;
-  let batch = [];
+  let documents = [];
   let processed = 0;
 
+  // First, collect a batch of documents
   while (await cursor.hasNext()) {
     const doc = await cursor.next();
     processed++;
@@ -146,34 +170,53 @@ async function ingestCollection({ mongo, openai, pineconeIndex }, collName, cont
       console.log(`🔄 [${contentType}] Processed ${processed} documents`);
     }
 
-    const text = buildText(doc, collName);
-    const embeddingRes = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: text,
-    });
-    const vector = embeddingRes.data[0].embedding;
-
-    batch.push({
+    documents.push({
       id: doc._id.toString(),
-      values: vector,
-      metadata: { type: contentType }
+      text: buildText(doc, collName)
     });
 
-    if (batch.length >= BATCH_SIZE) {
-      console.log(`🚀 [${contentType}] Upserting batch of ${batch.length}`);
-      await pineconeIndex.upsert(batch);
-      console.log(`✅ [${contentType}] Upserted batch`);
-      batch = [];
+    // When we have enough documents, process them in batch
+    if (documents.length >= BATCH_SIZE) {
+      await processBatch(documents, openai, pineconeIndex, contentType);
+      documents = [];
+      // Add a small delay between batches
+      await sleep(1000);
     }
   }
 
-  if (batch.length) {
-    console.log(`🚀 [${contentType}] Upserting final batch of ${batch.length}`);
-    await pineconeIndex.upsert(batch);
-    console.log(`✅ [${contentType}] Final batch upserted`);
+  // Process any remaining documents
+  if (documents.length > 0) {
+    await processBatch(documents, openai, pineconeIndex, contentType);
   }
 
   console.log(`🎉 Completed ingestion for ${collName}: ${processed} documents processed`);
+}
+
+async function processBatch(documents, openai, pineconeIndex, contentType) {
+  // Get embeddings for all texts in the batch at once
+  const texts = documents.map(doc => doc.text);
+
+  console.log(`🔄 Getting embeddings for batch of ${texts.length} documents`);
+  const embeddingRes = await withRetry(async () => {
+    return await openai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: texts,
+    });
+  });
+
+  // Prepare vectors for Pinecone
+  const vectors = documents.map((doc, i) => ({
+    id: doc.id,
+    values: embeddingRes.data[i].embedding,
+    metadata: { type: contentType }
+  }));
+
+  // Upsert vectors to Pinecone
+  console.log(`🚀 Upserting batch of ${vectors.length} vectors`);
+  await withRetry(async () => {
+    await pineconeIndex.upsert(vectors);
+  });
+  console.log(`✅ Batch upserted successfully`);
 }
 
 // ---------------------------

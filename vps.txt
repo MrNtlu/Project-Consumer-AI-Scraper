@@ -1,5 +1,7 @@
 ssh username@server_ip_address
 
+pm2 start index.js --name aiscript --node-args="--max-old-space-size=3072" --no-autorestart --cron-restart="0 0 1 * *"
+
 pm2 start upcoming.js --name myapp --node-args="--max-old-space-size=3072" --no-autorestart
 
 pm2 start upcoming.js --name upcoming --node-args="--max-old-space-size=3072" --no-autorestart --cron-restart="0 3 * * 1"
