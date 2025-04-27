@@ -147,7 +147,6 @@ async function ingestCollection({ mongo, openai, pineconeIndex }, collName, cont
     }
 
     const text = buildText(doc, collName);
-    console.log('Text:', text);
     const embeddingRes = await openai.embeddings.create({
       model: 'text-embedding-3-small',
       input: text,
