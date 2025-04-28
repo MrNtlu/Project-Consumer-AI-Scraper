@@ -133,15 +133,30 @@ function sleep(ms) {
 }
 
 // Helper function to handle rate limits with exponential backoff
-async function withRetry(fn, maxRetries = 3) {
+async function withRetry(fn, maxRetries = 5, initialWaitTime = 4400) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
+      // Handle OpenAI rate limits
       if (error?.error?.type === 'requests' && error.status === 429) {
-        const waitTime = 4400;
+        const waitTime = initialWaitTime * Math.pow(1.5, attempt - 1);
         console.log(`⏳ Rate limit hit, waiting ${waitTime/1000}s before retry ${attempt}/${maxRetries}`);
         await sleep(waitTime);
+        continue;
+      }
+
+      // Handle timeout errors
+      if (error.message && (error.message.includes('timeout') || error.message.includes('timed out'))) {
+        const waitTime = initialWaitTime * Math.pow(1.5, attempt - 1);
+        console.log(`⏳ Timeout error, waiting ${waitTime/1000}s before retry ${attempt}/${maxRetries}`);
+        await sleep(waitTime);
+        continue;
+      }
+
+      if (attempt < maxRetries) {
+        console.log(`⚠️ Error in attempt ${attempt}, retrying...`, error.message || error);
+        await sleep(initialWaitTime * Math.pow(1.5, attempt - 1));
         continue;
       }
       throw error;
@@ -155,41 +170,88 @@ async function withRetry(fn, maxRetries = 3) {
 // -------------------------------------------------------------------
 async function ingestCollection({ mongo, openai, pineconeIndex }, collName, contentType) {
   console.log(`📂 Starting ingestion for collection: ${collName}`);
-  const cursor = mongo.db().collection(collName).find({});
+  const collection = mongo.db().collection(collName);
   const BATCH_SIZE = 50;
-  let documents = [];
   let processed = 0;
+  let failedAttempts = 0;
 
-  // First, collect a batch of documents
-  while (await cursor.hasNext()) {
-    const doc = await cursor.next();
-    processed++;
+  try {
+    // Get total count for progress tracking
+    const totalDocuments = await collection.countDocuments({});
+    console.log(`📊 Total documents to process: ${totalDocuments}`);
 
-    // Log every 100 items
-    if (processed % 100 === 0) {
-      console.log(`🔄 [${contentType}] Processed ${processed} documents`);
+    // Use MongoDB's built-in batch processing
+    let batchNum = 0;
+    let hasMoreData = true;
+
+    while (hasMoreData) {
+      try {
+        batchNum++;
+        console.log(`🔄 Processing batch #${batchNum} (skipping ${processed} documents)`);
+
+        // Get next batch with error handling
+        let batch = [];
+        try {
+          batch = await withRetry(async () => {
+            return await collection.find({})
+              .skip(processed)
+              .limit(BATCH_SIZE)
+              .toArray();
+          }, 3);
+        } catch (err) {
+          console.error(`⚠️ Error fetching batch #${batchNum}, will retry:`, err.message || err);
+          await sleep(5000); // Wait before retrying
+          continue;
+        }
+
+        // Check if we've processed all documents
+        if (batch.length === 0) {
+          console.log(`✅ All documents processed for ${collName}`);
+          hasMoreData = false;
+          break;
+        }
+
+        const documents = batch.map(doc => ({
+          id: doc._id.toString(),
+          text: buildText(doc, collName)
+        }));
+
+        // Process the batch with more robust error handling
+        try {
+          await processBatch(documents, openai, pineconeIndex, contentType);
+          processed += batch.length;
+          failedAttempts = 0; // Reset failed attempts counter after success
+
+          // Log progress
+          console.log(`🔄 [${contentType}] Progress: ${processed}/${totalDocuments} (${Math.round(processed/totalDocuments*100)}%)`);
+
+          // Small delay between successful batches
+          await sleep(1000);
+        } catch (err) {
+          failedAttempts++;
+          console.error(`❌ Failed to process batch #${batchNum} (attempt ${failedAttempts}):`, err.message || err);
+
+          if (failedAttempts >= 5) {
+            console.error(`⛔ Too many failed attempts on batch #${batchNum}, skipping this batch`);
+            processed += batch.length; // Skip this batch after too many failures
+            failedAttempts = 0;
+          }
+
+          // Wait longer between failed attempts
+          await sleep(5000 * failedAttempts);
+        }
+      } catch (batchErr) {
+        console.error(`⚠️ Error in batch processing loop for ${collName}:`, batchErr.message || batchErr);
+        await sleep(5000);
+        // Continue to next iteration, don't break the loop
+      }
     }
 
-    documents.push({
-      id: doc._id.toString(),
-      text: buildText(doc, collName)
-    });
-
-    // When we have enough documents, process them in batch
-    if (documents.length >= BATCH_SIZE) {
-      await processBatch(documents, openai, pineconeIndex, contentType);
-      documents = [];
-      // Add a small delay between batches
-      await sleep(1000);
-    }
+    console.log(`🎉 Completed ingestion for ${collName}: ${processed} documents processed`);
+  } catch (err) {
+    console.error(`❌ Error ingesting ${collName}:`, err);
+    console.log(`🔄 Will continue with remaining collections`);
   }
-
-  // Process any remaining documents
-  if (documents.length > 0) {
-    await processBatch(documents, openai, pineconeIndex, contentType);
-  }
-
-  console.log(`🎉 Completed ingestion for ${collName}: ${processed} documents processed`);
 }
 
 async function processBatch(documents, openai, pineconeIndex, contentType) {
@@ -197,6 +259,8 @@ async function processBatch(documents, openai, pineconeIndex, contentType) {
   const texts = documents.map(doc => doc.text);
 
   console.log(`🔄 Getting embeddings for batch of ${texts.length} documents`);
+
+  // More robust retry for OpenAI embedding
   const embeddingRes = await withRetry(async () => {
     return await openai.embeddings.create({
       model: 'text-embedding-3-small',
@@ -211,7 +275,7 @@ async function processBatch(documents, openai, pineconeIndex, contentType) {
     metadata: { type: contentType }
   }));
 
-  // Upsert vectors to Pinecone
+  // Upsert vectors to Pinecone with better error handling
   console.log(`🚀 Upserting batch of ${vectors.length} vectors`);
   await withRetry(async () => {
     await pineconeIndex.upsert(vectors);
@@ -223,26 +287,46 @@ async function processBatch(documents, openai, pineconeIndex, contentType) {
 // 5. Main orchestrator
 // ---------------------------
 async function main() {
-  const { mongo, openai, pinecone } = await initClients();
-  const pineconeIndex = await ensureIndex(pinecone);
+  let mongo;
 
-  const collections = [
-    ['movies', 'movie'],
-    ['tv-series', 'tvseries'],
-    ['animes', 'anime'],
-    ['games', 'game'],
-  ];
+  try {
+    const clients = await initClients();
+    mongo = clients.mongo;
+    const { openai, pinecone } = clients;
+    const pineconeIndex = await ensureIndex(pinecone);
 
-  for (const [coll, type] of collections) {
-    try {
-      await ingestCollection({ mongo, openai, pineconeIndex }, coll, type);
-    } catch (err) {
-      console.error(`❌ Error ingesting ${coll}:`, err);
+    const collections = [
+      ['movies', 'movie'],
+      ['tv-series', 'tvseries'],
+      ['animes', 'anime'],
+      ['games', 'game'],
+    ];
+
+    // Process collections sequentially to avoid overwhelming connections
+    for (const [coll, type] of collections) {
+      try {
+        await ingestCollection({ mongo, openai, pineconeIndex }, coll, type);
+      } catch (err) {
+        console.error(`❌ Error during processing of ${coll}:`, err);
+        console.log(`🔄 Continuing with next collection...`);
+        // Continue to next collection even if this one failed
+      }
+    }
+
+    console.log('🏁 All collections processed');
+  } catch (err) {
+    console.error('❌ Fatal error in ingestion script:', err);
+  } finally {
+    // Ensure MongoDB connection is closed properly
+    if (mongo) {
+      try {
+        await mongo.close();
+        console.log('📡 MongoDB connection closed');
+      } catch (closeErr) {
+        console.error('❌ Error closing MongoDB connection:', closeErr);
+      }
     }
   }
-
-  await mongo.close();
-  console.log('🏁 All collections ingested successfully');
 }
 
 main().catch(err => {
