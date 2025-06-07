@@ -4,6 +4,13 @@ import { MongoClient } from 'mongodb';
 import OpenAI from 'openai';
 import { Pinecone } from '@pinecone-database/pinecone';
 
+const PRIOR_SCORE = 5;
+const CONFIDENCE_VOTES = 1000;
+
+function bayesianAdjusted(sumOfScores, voteCount, C = PRIOR_SCORE, m = CONFIDENCE_VOTES) {
+  return (sumOfScores + m * C) / (voteCount + m);
+}
+
 // ---------------------------
 // 1. Initialize all clients
 // ---------------------------
@@ -74,13 +81,17 @@ function buildText(doc, type) {
       const relations = (doc.relations || []).flatMap(r => [r.relation, ...r.source.map(s => s.name)]);
       const studios = (doc.studios || []).map(s => s.name);
       const themes = (doc.themes || []).map(t => t.name);
+      const mal_score = doc.mal_score || 0;
+      const mal_scored_by = doc.mal_scored_by || 1;
+      const mal_overall_score = bayesianAdjusted(mal_score, mal_scored_by);
       text = `${doc.title_en || doc.title_original} is an anime${doc.title_jp ? ` (${doc.title_jp})` : ''}. ` +
-             `Description: ${doc.description || 'No description available.'} ` +
-             `Characters: ${chars.join(', ')}. ` +
-             `Demographics: ${demos.join(', ')}. Genres: ${genres.join(', ')}. ` +
-             `Producers: ${producers.join(', ')}. ` +
-             `Relations: ${relations.join(', ')}. ` +
-             `Studios: ${studios.join(', ')}. Themes: ${themes.join(', ')}.`;
+        `Description: ${doc.description || 'No description available.'} ` +
+        `Characters: ${chars.join(', ')}. ` +
+        `Demographics: ${demos.join(', ')}. Genres: ${genres.join(', ')}. ` +
+        `Producers: ${producers.join(', ')}. ` +
+        `Relations: ${relations.join(', ')}. ` +
+        `Studios: ${studios.join(', ')}. Themes: ${themes.join(', ')}.` +
+        `Score: ${mal_overall_score.toFixed(2)}.`;
       break;
     }
 
@@ -88,10 +99,15 @@ function buildText(doc, type) {
       const actors = (doc.actors || []).slice(0, 10).map(a => a.name);
       const genres = (doc.genres || []);
       const companies = (doc.production_companies || []).map(pc => pc.name);
+      const tmdb_vote = doc.tmdb_vote || 0;
+      const tmdb_vote_count = doc.tmdb_vote_count || 1;
+      const tmdb_overall_score = bayesianAdjusted(tmdb_vote, tmdb_vote_count);
+
       text = `${doc.title_en || doc.title_original} is a movie. ` +
-             `Plot: ${doc.description || 'No description available.'} ` +
-             `Starring: ${actors.join(', ')}. Genres: ${genres.join(', ')}. ` +
-             `Production: ${companies.join(', ')}.`;
+        `Plot: ${doc.description || 'No description available.'} ` +
+        `Starring: ${actors.join(', ')}. Genres: ${genres.join(', ')}. ` +
+        `Production: ${companies.join(', ')}.` +
+        `Score: ${tmdb_overall_score.toFixed(2)}.`;
       break;
     }
 
@@ -100,10 +116,15 @@ function buildText(doc, type) {
       const genres = (doc.genres || []);
       const nets = (doc.networks || []).map(n => n.name);
       const companies = (doc.production_companies || []).map(pc => pc.name);
+      const tmdb_vote = doc.tmdb_vote || 0;
+      const tmdb_vote_count = doc.tmdb_vote_count || 1;
+      const tmdb_overall_score = bayesianAdjusted(tmdb_vote, tmdb_vote_count);
+
       text = `${doc.title_en || doc.title_original} is a TV series. ` +
-             `Overview: ${doc.description || 'No description available.'} ` +
-             `Cast: ${actors.join(', ')}. Genres: ${genres.join(', ')}. ` +
-             `Networks: ${nets.join(', ')}. Production: ${companies.join(', ')}.`;
+        `Overview: ${doc.description || 'No description available.'} ` +
+        `Cast: ${actors.join(', ')}. Genres: ${genres.join(', ')}. ` +
+        `Networks: ${nets.join(', ')}. Production: ${companies.join(', ')}.` +
+        `Score: ${tmdb_overall_score.toFixed(2)}.`;
       break;
     }
 
@@ -114,10 +135,11 @@ function buildText(doc, type) {
       const publishers = (doc.publishers || []);
       const tags = (doc.tags || []);
       text = `${doc.title || doc.title_original} is a game. ` +
-             `About: ${(doc.description || '').replace(/<[^>]+>/g, '')} ` +
-             `Developed by: ${developers.join(', ')}. Genres: ${genres.join(', ')}. ` +
-             `Metacritic Score: ${doc.metacritic_score || 'N/A'}. Platforms: ${platforms.join(', ')}. ` +
-             `Published by: ${publishers.join(', ')}. Tags: ${tags.join(', ')}.`;
+        `About: ${(doc.description || '').replace(/<[^>]+>/g, '')} ` +
+        `Developed by: ${developers.join(', ')}. Genres: ${genres.join(', ')}. ` +
+        `Metacritic Score: ${doc.metacritic_score || 'N/A'}. Platforms: ${platforms.join(', ')}. ` +
+        `Published by: ${publishers.join(', ')}. Tags: ${tags.join(', ')}.` +
+        `Score: ${doc.metacritic_score || 50}.`;
       break;
     }
 
@@ -141,7 +163,7 @@ async function withRetry(fn, maxRetries = 5, initialWaitTime = 4400) {
       // Handle OpenAI rate limits
       if (error?.error?.type === 'requests' && error.status === 429) {
         const waitTime = initialWaitTime * Math.pow(1.5, attempt - 1);
-        console.log(`⏳ Rate limit hit, waiting ${waitTime/1000}s before retry ${attempt}/${maxRetries}`);
+        console.log(`⏳ Rate limit hit, waiting ${waitTime / 1000}s before retry ${attempt}/${maxRetries}`);
         await sleep(waitTime);
         continue;
       }
@@ -149,7 +171,7 @@ async function withRetry(fn, maxRetries = 5, initialWaitTime = 4400) {
       // Handle timeout errors
       if (error.message && (error.message.includes('timeout') || error.message.includes('timed out'))) {
         const waitTime = initialWaitTime * Math.pow(1.5, attempt - 1);
-        console.log(`⏳ Timeout error, waiting ${waitTime/1000}s before retry ${attempt}/${maxRetries}`);
+        console.log(`⏳ Timeout error, waiting ${waitTime / 1000}s before retry ${attempt}/${maxRetries}`);
         await sleep(waitTime);
         continue;
       }
@@ -223,7 +245,7 @@ async function ingestCollection({ mongo, openai, pineconeIndex }, collName, cont
           failedAttempts = 0; // Reset failed attempts counter after success
 
           // Log progress
-          console.log(`🔄 [${contentType}] Progress: ${processed}/${totalDocuments} (${Math.round(processed/totalDocuments*100)}%)`);
+          console.log(`🔄 [${contentType}] Progress: ${processed}/${totalDocuments} (${Math.round(processed / totalDocuments * 100)}%)`);
 
           // Small delay between successful batches
           await sleep(1000);

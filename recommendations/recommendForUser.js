@@ -541,7 +541,7 @@ async function recommendForUser(userIds = [], topK = 10) {
 
     // If no content at all, return empty recommendations
     const totalContent = userData.movieDetails.length + userData.tvSeriesDetails.length +
-                        userData.animeDetails.length + userData.gameDetails.length;
+      userData.animeDetails.length + userData.gameDetails.length;
 
     if (totalContent === 0) {
       console.warn("User has no content to base recommendations on");
